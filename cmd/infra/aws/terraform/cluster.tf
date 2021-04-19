@@ -472,3 +472,253 @@ resource "aws_security_group" "worker" {
     local.tags,
   )
 }
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(
+    { "Name" = "${var.cluster_id}-private" },
+    local.tags,
+  )
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route" "private_nat_gw" {
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.gw.id
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(
+    { "Name" = "${var.cluster_id}-public" },
+    local.tags,
+  )
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route" "public_gw" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.gw.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id       = aws_vpc.main.id
+  service_name = "com.amazonaws.${var.aws_region}.s3"
+  route_table_ids = [
+    aws_route_table.private.id,
+    aws_route_table.public.id,
+  ]
+}
+
+resource "aws_route53_zone" "private" {
+  name = var.cluster_domain
+
+  vpc {
+    vpc_id = aws_vpc.main.id
+  }
+
+  tags = merge(
+    { "Name" = "${var.cluster_id}-private" },
+    local.tags,
+  )
+}
+
+resource "aws_route53_zone" "public" {
+  name = var.cluster_domain
+
+  tags = merge(
+    { "Name" = "${var.cluster_id}-private" },
+    local.tags,
+  )
+}
+
+resource "aws_iam_policy" "cloud_controller" {
+  name = "${var.cluster_id}.cloud-provider.hypershift.openshift.io"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeImages",
+          "ec2:DescribeRegions",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVolumes",
+          "ec2:CreateSecurityGroup",
+          "ec2:CreateTags",
+          "ec2:CreateVolume",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:ModifyVolume",
+          "ec2:AttachVolume",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:CreateRoute",
+          "ec2:DeleteRoute",
+          "ec2:DeleteSecurityGroup",
+          "ec2:DeleteVolume",
+          "ec2:DetachVolume",
+          "ec2:RevokeSecurityGroupIngress",
+          "ec2:DescribeVpcs",
+          "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:AttachLoadBalancerToSubnets",
+          "elasticloadbalancing:ApplySecurityGroupsToLoadBalancer",
+          "elasticloadbalancing:CreateLoadBalancer",
+          "elasticloadbalancing:CreateLoadBalancerPolicy",
+          "elasticloadbalancing:CreateLoadBalancerListeners",
+          "elasticloadbalancing:ConfigureHealthCheck",
+          "elasticloadbalancing:DeleteLoadBalancer",
+          "elasticloadbalancing:DeleteLoadBalancerListeners",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeLoadBalancerAttributes",
+          "elasticloadbalancing:DetachLoadBalancerFromSubnets",
+          "elasticloadbalancing:DeregisterInstancesFromLoadBalancer",
+          "elasticloadbalancing:ModifyLoadBalancerAttributes",
+          "elasticloadbalancing:RegisterInstancesWithLoadBalancer",
+          "elasticloadbalancing:SetLoadBalancerPoliciesForBackendServer",
+          "elasticloadbalancing:AddTags",
+          "elasticloadbalancing:CreateListener",
+          "elasticloadbalancing:CreateTargetGroup",
+          "elasticloadbalancing:DeleteListener",
+          "elasticloadbalancing:DeleteTargetGroup",
+          "elasticloadbalancing:DescribeListeners",
+          "elasticloadbalancing:DescribeLoadBalancerPolicies",
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetHealth",
+          "elasticloadbalancing:ModifyListener",
+          "elasticloadbalancing:ModifyTargetGroup",
+          "elasticloadbalancing:RegisterTargets",
+          "elasticloadbalancing:SetLoadBalancerPoliciesOfListener",
+          "iam:CreateServiceLinkedRole",
+          "kms:DescribeKey",
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_policy" "node_pool" {
+  name = "${var.cluster_id}.node-pool-controller.hypershift.openshift.io"
+
+  # Terraform's "jsonencode" function converts a
+  # Terraform expression result to valid JSON syntax.
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "ec2:AllocateAddress",
+          "ec2:AssociateRouteTable",
+          "ec2:AttachInternetGateway",
+          "ec2:AuthorizeSecurityGroupIngress",
+          "ec2:CreateInternetGateway",
+          "ec2:CreateNatGateway",
+          "ec2:CreateRoute",
+          "ec2:CreateRouteTable",
+          "ec2:CreateSecurityGroup",
+          "ec2:CreateSubnet",
+          "ec2:CreateTags",
+          "ec2:DeleteInternetGateway",
+          "ec2:DeleteNatGateway",
+          "ec2:DeleteRouteTable",
+          "ec2:DeleteSecurityGroup",
+          "ec2:DeleteSubnet",
+          "ec2:DeleteTags",
+          "ec2:DescribeAccountAttributes",
+          "ec2:DescribeAddresses",
+          "ec2:DescribeAvailabilityZones",
+          "ec2:DescribeInstances",
+          "ec2:DescribeInternetGateways",
+          "ec2:DescribeNatGateways",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeNetworkInterfaceAttribute",
+          "ec2:DescribeRouteTables",
+          "ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeVpcAttribute",
+          "ec2:DescribeVolumes",
+          "ec2:DetachInternetGateway",
+          "ec2:DisassociateRouteTable",
+          "ec2:DisassociateAddress",
+          "ec2:ModifyInstanceAttribute",
+          "ec2:ModifyNetworkInterfaceAttribute",
+          "ec2:ModifySubnetAttribute",
+          "ec2:ReleaseAddress",
+          "ec2:RevokeSecurityGroupIngress",
+          "ec2:RunInstances",
+          "ec2:TerminateInstances",
+          "tag:GetResources",
+          "ec2:CreateLaunchTemplate",
+          "ec2:CreateLaunchTemplateVersion",
+          "ec2:DescribeLaunchTemplates",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:DeleteLaunchTemplate",
+          "ec2:DeleteLaunchTemplateVersions",
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      },
+      {
+        Action = [
+          "iam:CreateServiceLinkedRole"
+        ]
+        Effect   = "Allow"
+        Resource = "arn:*:iam::*:role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForElasticLoadBalancing"
+        Condition = {
+          StringLike = {
+            "iam:AWSServiceName" = "elasticloadbalancing.amazonaws.com"
+          }
+        }
+      },
+      {
+        Action = [
+          "iam:PassRole"
+        ]
+        Effect   = "Allow"
+        Resource = "arn:*:iam::*:role/*-worker"
+      },
+    ]
+  })
+}
+
+resource "aws_iam_user" "cloud_controller" {
+  name = "${var.cluster_id}-cloud-controller"
+}
+
+resource "aws_iam_user" "node_pool" {
+  name = "${var.cluster_id}-node-pool"
+}
+
+resource "aws_iam_user_policy_attachment" "cloud_controller" {
+  user       = aws_iam_user.cloud_controller.name
+  policy_arn = aws_iam_policy.cloud_controller.arn
+}
+
+resource "aws_iam_user_policy_attachment" "node_pool" {
+  user       = aws_iam_user.node_pool.name
+  policy_arn = aws_iam_policy.node_pool.arn
+}
+
+resource "aws_iam_access_key" "cloud_controller" {
+  user = aws_iam_user.cloud_controller.name
+}
+
+resource "aws_iam_access_key" "node_pool" {
+  user = aws_iam_user.node_pool.name
+}
