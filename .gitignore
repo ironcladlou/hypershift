@@ -28,3 +28,6 @@ tools/bin
 
 .kube
 /kubeconfig
+
+.terraform*
+terraform.tfstate*
