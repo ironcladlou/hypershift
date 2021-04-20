@@ -722,3 +722,11 @@ resource "aws_iam_access_key" "cloud_controller" {
 resource "aws_iam_access_key" "node_pool" {
   user = aws_iam_user.node_pool.name
 }
+
+resource "aws_route53_record" "delegate" {
+  zone_id = var.base_domain_zone_id
+  name    = var.cluster_domain
+  type    = "NS"
+  ttl     = "60"
+  records = aws_route53_zone.public.name_servers
+}
