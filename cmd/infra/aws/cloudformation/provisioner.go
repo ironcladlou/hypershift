@@ -1,10 +1,11 @@
-package aws
+package cloudformation
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	_ "embed"
 	"encoding/pem"
 	"fmt"
 	"sort"
@@ -12,13 +13,26 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awserrors "github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/bombsimon/logrusr"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	hypercf "github.com/openshift/hypershift/cmd/infra/aws/cloudformation"
+	"github.com/openshift/hypershift/cmd/infra/aws/provisioner"
+	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 )
+
+//go:embed cluster.yaml
+var ClusterTemplate string
+
+var log = logrusr.NewLogger(logrus.New())
 
 type StackOutput struct {
 	StackID                                string `json:"stackID"`
@@ -47,12 +61,14 @@ type StackOutput struct {
 }
 
 type CloudFormationProvisioner struct {
+	AWSCredentialsFile       string
+	DeleteOnProvisionFailure bool
 }
 
-func (p *CloudFormationProvisioner) Provision(ctx context.Context, opts *CreateInfraOptions) (*AWSInfrastructure, error) {
-	awsSession := newSession()
-	awsConfig := newConfig(opts.AWSCredentialsFile, opts.Region)
-	r53Config := newConfig(opts.AWSCredentialsFile, "us-east-1")
+func (p *CloudFormationProvisioner) Provision(ctx context.Context, opts *provisioner.ProvisionOptions) (*provisioner.AWSInfrastructure, error) {
+	awsSession := awsutil.NewSession()
+	awsConfig := awsutil.NewConfig(p.AWSCredentialsFile, opts.Region)
+	r53Config := awsutil.NewConfig(p.AWSCredentialsFile, "us-east-1")
 
 	cf := cloudformation.New(awsSession, awsConfig)
 	r53 := route53.New(awsSession, r53Config)
@@ -77,7 +93,7 @@ func (p *CloudFormationProvisioner) Provision(ctx context.Context, opts *CreateI
 		Bytes:   x509.MarshalPKCS1PrivateKey(privKey),
 	})
 
-	return &AWSInfrastructure{
+	return &provisioner.AWSInfrastructure{
 		Region:                                 stack.Region,
 		Zone:                                   stack.Zone,
 		ID:                                     stack.InfraID,
@@ -104,10 +120,10 @@ func (p *CloudFormationProvisioner) Provision(ctx context.Context, opts *CreateI
 	}, nil
 }
 
-func (p *CloudFormationProvisioner) getOrCreateStack(ctx context.Context, cf *cloudformation.CloudFormation, r53 route53iface.Route53API, o *CreateInfraOptions) (*StackOutput, error) {
+func (p *CloudFormationProvisioner) getOrCreateStack(ctx context.Context, cf *cloudformation.CloudFormation, r53 route53iface.Route53API, o *provisioner.ProvisionOptions) (*StackOutput, error) {
 	log.Info("Creating infrastructure", "id", o.InfraID, "baseDomain", o.BaseDomain, "subdomain", o.Subdomain)
 
-	publicZoneID, err := lookupZone(r53, o.BaseDomain, false)
+	publicZoneID, err := awsutil.LookupZone(r53, o.BaseDomain, false)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't find a public zone for base domain %s: %w", o.BaseDomain, err)
 	}
@@ -156,10 +172,10 @@ func (p *CloudFormationProvisioner) getOrCreateStack(ctx context.Context, cf *cl
 	return output, nil
 }
 
-func (p *CloudFormationProvisioner) createStack(ctx context.Context, cf *cloudformation.CloudFormation, baseDomainZoneID string, o *CreateInfraOptions) (*cloudformation.Stack, error) {
+func (p *CloudFormationProvisioner) createStack(ctx context.Context, cf *cloudformation.CloudFormation, baseDomainZoneID string, o *provisioner.ProvisionOptions) (*cloudformation.Stack, error) {
 	createStackInput := &cloudformation.CreateStackInput{
 		Capabilities: []*string{aws.String(cloudformation.CapabilityCapabilityNamedIam)},
-		TemplateBody: &hypercf.ClusterTemplate,
+		TemplateBody: &ClusterTemplate,
 		StackName:    aws.String(o.InfraID),
 		Tags: []*cloudformation.Tag{
 			{
@@ -183,7 +199,7 @@ func (p *CloudFormationProvisioner) createStack(ctx context.Context, cf *cloudfo
 		},
 	}
 
-	if o.DeleteOnFailure {
+	if p.DeleteOnProvisionFailure {
 		createStackInput.OnFailure = aws.String(cloudformation.OnFailureDelete)
 	} else {
 		createStackInput.OnFailure = aws.String(cloudformation.OnFailureRollback)
@@ -294,4 +310,208 @@ func (p *CloudFormationProvisioner) configureSubdomain(ctx context.Context, cf *
 	log.Info("Updated subdomain NS record in base zone", "zoneID", zoneID, "subdomain", subdomain, "nameservers", nameservers)
 
 	return nil
+}
+
+func (p *CloudFormationProvisioner) Destroy(ctx context.Context, opts *provisioner.DestroyOptions) error {
+	awsSession := awsutil.NewSession()
+	awsConfig := awsutil.NewConfig(p.AWSCredentialsFile, opts.Region)
+	r53Config := awsutil.NewConfig(p.AWSCredentialsFile, "us-east-1")
+
+	cf := cloudformation.New(awsSession, awsConfig)
+	s3client := s3.New(awsSession, awsConfig)
+	elbclient := elb.New(awsSession, awsConfig)
+	ec2client := ec2.New(awsSession, awsConfig)
+	r53 := route53.New(awsSession, r53Config)
+
+	stack, err := getStack(cf, opts.InfraID)
+	if err != nil {
+		if awserr, ok := err.(awserrors.Error); ok {
+			// TODO: Where is this code constant in the aws sdk?
+			if awserr.Code() == "ValidationError" {
+				log.Error(err, "stack already deleted", "id", opts.InfraID)
+				return nil
+			}
+			return awserr
+		}
+		return fmt.Errorf("failed to get stack: %w", err)
+	}
+	log.Info("Found stack", "id", *stack.StackId)
+
+	// Clean up the OIDC S3 bucket so it can be deleted along with the stack
+	bucket := getStackOutput(stack, "OIDCBucketName")
+	if err := emptyBucket(ctx, bucket, s3client); err != nil {
+		return fmt.Errorf("failed to empty the OIDC bucket: %w", err)
+	}
+	log.Info("Emptied OIDC bucket", "id", bucket)
+
+	// Delete the NS record from the base domain hosted zone
+	baseDomainZoneID := getStackOutput(stack, "BaseDomainHostedZoneId")
+	subdomain := getStackOutput(stack, "Subdomain")
+	if err := awsutil.DeleteRecord(ctx, r53, baseDomainZoneID, "NS", subdomain); err != nil {
+		return fmt.Errorf("failed to clean up the base domain zone: %w", err)
+	}
+	log.Info("Cleaned up the base domain hosted zone", "id", baseDomainZoneID, "subdomain", subdomain)
+
+	// Find and delete any non-default unmanaged DNS records
+	subdomainPrivateZoneID := getStackOutput(stack, "SubdomainPrivateZoneId")
+	if err := awsutil.DeleteNonDefaultRecords(ctx, r53, subdomainPrivateZoneID); err != nil {
+		return fmt.Errorf("failed to clean up the subdomain private zone: %w", err)
+	}
+	log.Info("Cleaned up the subdomain private zone", "zone", subdomainPrivateZoneID)
+	subdomainPublicZoneID := getStackOutput(stack, "SubdomainPublicZoneId")
+	err = awsutil.DeleteNonDefaultRecords(ctx, r53, subdomainPublicZoneID)
+	if err != nil {
+		return fmt.Errorf("failed to clean up the subdomain public zone: %w", err)
+	}
+	log.Info("Cleaned up the subdomain public zone", "zone", subdomainPublicZoneID)
+
+	vpcID := getStackOutput(stack, "VPCId")
+
+	// Find and delete any unmanaged leaked load balancers
+	if err := awsutil.DeleteUnmanagedELBs(ctx, elbclient, vpcID); err != nil {
+		return fmt.Errorf("failed to delete unmanaged ELBs: %w", err)
+	}
+	log.Info("Cleaned up unmanaged ELBs")
+
+	// Find and delete any unmanaged leaked security groups
+	if err := awsutil.DeleteUnmanagedSecurityGroups(ctx, ec2client, vpcID); err != nil {
+		return fmt.Errorf("failed to delete unmanaged security groups: %w", err)
+	}
+	log.Info("Cleaned up unmanaged security groups")
+
+	// Delete the stack itself
+	if err := deleteStack(ctx, cf, stack); err != nil {
+		return fmt.Errorf("failed to delete stack: %w", err)
+	}
+	log.Info("Deleted the stack", "id", *stack.StackId)
+
+	return nil
+}
+
+func getStack(cf *cloudformation.CloudFormation, id string) (*cloudformation.Stack, error) {
+	output, err := cf.DescribeStacks(&cloudformation.DescribeStacksInput{
+		StackName: aws.String(id),
+	})
+	if err != nil {
+		if awserr, ok := err.(awserrors.Error); ok {
+			return nil, awserr
+		}
+		return nil, fmt.Errorf("failed to describe stack: %w", err)
+	}
+	if count := len(output.Stacks); count != 1 {
+		return nil, fmt.Errorf("expected exactly 1 stack, got %d", count)
+	}
+	return output.Stacks[0], nil
+}
+
+func getStackOutput(stack *cloudformation.Stack, key string) string {
+	for i, o := range stack.Outputs {
+		if o.OutputKey != nil && *o.OutputKey == key {
+			return *stack.Outputs[i].OutputValue
+		}
+	}
+	return ""
+}
+
+func deleteStack(ctx context.Context, cf *cloudformation.CloudFormation, stack *cloudformation.Stack) error {
+	_, err := cf.DeleteStack(&cloudformation.DeleteStackInput{
+		StackName: stack.StackId,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete stack: %w", err)
+	}
+	log.Info("Waiting for stack to be deleted", "id", *stack.StackId)
+	err = wait.PollUntil(5*time.Second, func() (bool, error) {
+		output, err := cf.DescribeStacks(&cloudformation.DescribeStacksInput{
+			StackName: stack.StackId,
+		})
+		if err != nil {
+			if awserr, ok := err.(awserrors.Error); ok {
+				log.Error(err, "error describing stack", "code", awserr.Code(), "message", awserr.Message())
+				return true, nil
+			}
+			return false, fmt.Errorf("failed to describe stack: %w", err)
+		}
+		if count := len(output.Stacks); count != 1 {
+			return false, fmt.Errorf("expected exactly 1 stack, got %d", count)
+		}
+		stack := output.Stacks[0]
+		switch *stack.StackStatus {
+		case cloudformation.StackStatusDeleteComplete:
+			return true, nil
+		case cloudformation.StackStatusDeleteInProgress:
+			return false, nil
+		case cloudformation.StackStatusDeleteFailed:
+			return false, fmt.Errorf("stack deletion failed")
+		default:
+			log.Info("Stack is still pending deletion", "id", *stack.StackId, "status", *stack.StackStatus)
+			return false, nil
+		}
+	}, ctx.Done())
+	if err != nil {
+		return fmt.Errorf("failed to delete stack: %w", err)
+	}
+	log.Info("Finished deleting stack", "id", *stack.StackId)
+	return nil
+}
+
+func emptyBucket(ctx context.Context, bucket string, s3Client s3iface.S3API) error {
+	params := &s3.ListObjectsInput{
+		Bucket: aws.String(bucket),
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("bucket deletion was cancelled")
+		default:
+		}
+		objects, err := s3Client.ListObjects(params)
+		if err != nil {
+			if awserr, ok := err.(awserrors.Error); ok {
+				if awserr.Code() == "NoSuchBucket" {
+					// Nothing to do
+					return nil
+				}
+			}
+			return err
+		}
+		if len(objects.Contents) == 0 {
+			return nil
+		}
+		objectsToDelete := make([]*s3.ObjectIdentifier, 0, 1000)
+		for _, object := range objects.Contents {
+			objectsToDelete = append(objectsToDelete, &s3.ObjectIdentifier{
+				Key: object.Key,
+			})
+		}
+		deleteParams := &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &s3.Delete{Objects: objectsToDelete},
+		}
+		_, err = s3Client.DeleteObjects(deleteParams)
+		if err != nil {
+			return err
+		}
+		log.Info("Deleted bucket objects", "name", bucket, "count", len(objectsToDelete))
+		if *objects.IsTruncated {
+			params.Marker = deleteParams.Delete.Objects[len(deleteParams.Delete.Objects)-1].Key
+		} else {
+			break
+		}
+	}
+	return nil
+}
+
+type sortableStackEvents []*cloudformation.StackEvent
+
+func (e sortableStackEvents) Len() int {
+	return len(e)
+}
+
+func (e sortableStackEvents) Less(i, j int) bool {
+	return (*e[i].Timestamp).Before(*e[j].Timestamp)
+}
+
+func (e sortableStackEvents) Swap(i, j int) {
+	e[i], e[j] = e[j], e[i]
 }

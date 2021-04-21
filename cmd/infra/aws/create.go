@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -17,9 +16,13 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/spf13/cobra"
 	"gopkg.in/square/go-jose.v2"
+
+	"github.com/openshift/hypershift/cmd/infra/aws/cloudformation"
+	"github.com/openshift/hypershift/cmd/infra/aws/provisioner"
+	"github.com/openshift/hypershift/cmd/infra/aws/terraform"
+	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 )
 
 type CreateInfraOptions struct {
@@ -27,46 +30,15 @@ type CreateInfraOptions struct {
 
 	AWSCredentialsFile string
 
-	InfraID        string
-	Region         string
-	BaseDomain     string
-	Subdomain      string
-	AdditionalTags []string
+	InfraID    string
+	Region     string
+	BaseDomain string
+	Subdomain  string
 
-	DeleteOnFailure bool
+	CFAdditionalTags  []string
+	CFDeleteOnFailure bool
 
-	TerraformOutputsFile string
-}
-
-type AWSInfrastructure struct {
-	Region                                 string `json:"region"`
-	Zone                                   string `json:"zone"`
-	ID                                     string `json:"id"`
-	ComputeCIDR                            string `json:"computeCIDR"`
-	VPCID                                  string `json:"vpcID"`
-	PrivateSubnetID                        string `json:"privateSubnetID"`
-	PublicSubnetID                         string `json:"publicSubnetID"`
-	WorkerSecurityGroupID                  string `json:"workerSecurityGroupID"`
-	WorkerInstanceProfileID                string `json:"workerInstanceProfileID"`
-	BaseDomainZoneID                       string `json:"baseDomainZoneID"`
-	Subdomain                              string `json:"subdomain"`
-	SubdomainPrivateZoneID                 string `json:"subdomainPrivateZoneID"`
-	SubdomainPublicZoneID                  string `json:"subdomainPublicZoneID"`
-	OIDCIngressRoleArn                     string `json:"oidcIngressRoleArn"`
-	OIDCImageRegistryRoleArn               string `json:"oidcImageRegistryRoleArn"`
-	OIDCCSIDriverRoleArn                   string `json:"oidcCSIDriverRoleArn"`
-	OIDCIssuerURL                          string `json:"oidcIssuerURL"`
-	OIDCBucketName                         string `json:"oidcBucketName"`
-	ServiceAccountSigningKey               []byte `json:"serviceAccountSigningKey"`
-	KubeCloudControllerUserAccessKeyID     string `json:"kubeCloudControllerUserAccessKeyID"`
-	KubeCloudControllerUserAccessKeySecret string `json:"kubeCloudControllerUserAccessKeySecret"`
-	NodePoolManagementUserAccessKeyID      string `json:"nodePoolManagementUserAccessKeyID"`
-	NodePoolManagementUserAccessKeySecret  string `json:"nodePoolManagementUserAccessKeySecret"`
-}
-
-type Provisioner interface {
-	Provision(context.Context, *CreateInfraOptions) (*AWSInfrastructure, error)
-	//Destroy(context.Context, DestroyInfraOptions) error
+	TerraformDir string
 }
 
 func NewCreateCommand() *cobra.Command {
@@ -75,21 +47,23 @@ func NewCreateCommand() *cobra.Command {
 		Short: "Creates AWS infrastructure resources for a cluster",
 	}
 
+	cmd.AddCommand(terraform.NewTerraformCommand())
+
 	opts := CreateInfraOptions{
-		Provisioner:     "cloudformations",
-		Region:          "us-east-1",
-		DeleteOnFailure: false,
+		Provisioner:       provisioner.CloudFormationProvisionerType,
+		Region:            "us-east-1",
+		CFDeleteOnFailure: false,
 	}
 
-	cmd.Flags().StringVar(&opts.Provisioner, "provisioner", opts.Provisioner, "one of: cloudformations, terraform")
+	cmd.Flags().StringVar(&opts.Provisioner, "provisioner", opts.Provisioner, "one of: cloudformation, terraform")
 	cmd.Flags().StringVar(&opts.InfraID, "infra-id", opts.InfraID, "Cluster ID with which to tag AWS resources (required)")
 	cmd.Flags().StringVar(&opts.AWSCredentialsFile, "aws-creds", opts.AWSCredentialsFile, "Path to an AWS credentials file (required)")
 	cmd.Flags().StringVar(&opts.Region, "region", opts.Region, "Region where cluster infra should be created")
-	cmd.Flags().StringSliceVar(&opts.AdditionalTags, "additional-tags", opts.AdditionalTags, "Additional tags to set on AWS resources")
+	cmd.Flags().StringSliceVar(&opts.CFAdditionalTags, "additional-tags", opts.CFAdditionalTags, "Additional tags to set on AWS resources")
 	cmd.Flags().StringVar(&opts.BaseDomain, "base-domain", opts.BaseDomain, "The base domain for the cluster")
 	cmd.Flags().StringVar(&opts.Subdomain, "subdomain", opts.Subdomain, "The subdomain for the cluster")
-	cmd.Flags().BoolVar(&opts.DeleteOnFailure, "delete-on-failure", opts.DeleteOnFailure, "Delete the infra stack if creation fails")
-	cmd.Flags().StringVar(&opts.TerraformOutputsFile, "terraform-outputs-file", opts.TerraformOutputsFile, "Path to Terraform outputs JSON file")
+	cmd.Flags().BoolVar(&opts.CFDeleteOnFailure, "delete-on-failure", opts.CFDeleteOnFailure, "Delete the CloudFormations stack if creation fails")
+	cmd.Flags().StringVar(&opts.TerraformDir, "terraform-dir", opts.TerraformDir, "Path to a directory for the cluster's Terraform state")
 
 	cmd.MarkFlagRequired("infra-id")
 	cmd.MarkFlagRequired("aws-creds")
@@ -119,54 +93,60 @@ func NewCreateCommand() *cobra.Command {
 	return cmd
 }
 
-func (o *CreateInfraOptions) Run(ctx context.Context) (*AWSInfrastructure, error) {
+func (o *CreateInfraOptions) Run(ctx context.Context) (*provisioner.AWSInfrastructure, error) {
 	log.Info("Provisioning infrastructure", "id", o.InfraID)
 
 	// Run the provisioner
-	var provisioner Provisioner
+	var p provisioner.Provisioner
 	switch o.Provisioner {
-	case "terraform":
-		provisioner = &TerraformProvisioner{}
-	case "cloudformations":
+	case provisioner.TerraformProvisionerType:
+		p = &terraform.TerraformProvisioner{
+			AWSCredentialsFile: o.AWSCredentialsFile,
+			Directory:          o.TerraformDir,
+		}
+	case provisioner.CloudFormationProvisionerType:
 		fallthrough
 	default:
-		provisioner = &CloudFormationProvisioner{}
+		p = &cloudformation.CloudFormationProvisioner{
+			AWSCredentialsFile:       o.AWSCredentialsFile,
+			DeleteOnProvisionFailure: o.CFDeleteOnFailure,
+		}
 	}
-	infra, err := provisioner.Provision(ctx, o)
+	infra, err := p.Provision(ctx, &provisioner.ProvisionOptions{
+		InfraID:    o.InfraID,
+		Region:     o.Region,
+		BaseDomain: o.BaseDomain,
+		Subdomain:  o.Subdomain,
+	})
 	if err != nil {
 		return nil, err
 	}
-	log.Info("Provisioned infrastructure", "id", infra.ID)
 
-	// Initialize the provisioned infrastructure. This should all probably be deleted
+	// Initialize the provisioned infrastructure. This should probably be deleted
 	// once OIDC is ported to use native k8s support through the apiserver.
-	log.Info("Initializing infrastructure", "id", infra.ID)
-
-	awsSession := newSession()
-	awsConfig := newConfig(o.AWSCredentialsFile, o.Region)
-	s3client := s3.New(awsSession, awsConfig)
-
-	block, _ := pem.Decode(infra.ServiceAccountSigningKey)
-	if block == nil {
-		return nil, fmt.Errorf("failed to parse PEM block containing the service account signing key")
+	if err := o.configureOIDC(ctx, infra); err != nil {
+		return nil, fmt.Errorf("failed to configure OIDC for infastructure: %w", err)
 	}
-	serviceAccountSigningKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key from service account signing key block")
-	}
-
-	err = o.configureOIDC(s3client, serviceAccountSigningKey, infra.OIDCBucketName, infra.OIDCIssuerURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to install OIDC discovery data: %w", err)
-	}
-
-	log.Info("Initialized infrastructure", "id", infra.ID)
 
 	return infra, err
 }
 
-func (o *CreateInfraOptions) configureOIDC(s3Client s3iface.S3API, privKey *rsa.PrivateKey, bucketName string, issuerURL string) error {
-	pubKey := &privKey.PublicKey
+func (o *CreateInfraOptions) configureOIDC(ctx context.Context, infra *provisioner.AWSInfrastructure) error {
+	log.Info("Configuring OIDC support for infrastructure", "id", infra.ID)
+	awsSession := awsutil.NewSession()
+	awsConfig := awsutil.NewConfig(o.AWSCredentialsFile, o.Region)
+	s3client := s3.New(awsSession, awsConfig)
+
+	block, _ := pem.Decode(infra.ServiceAccountSigningKey)
+	if block == nil {
+		return fmt.Errorf("failed to parse PEM block containing the service account signing key")
+	}
+	serviceAccountSigningKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse private key from service account signing key block")
+	}
+
+	pubKey := &serviceAccountSigningKey.PublicKey
 	pubKeyDERBytes, err := x509.MarshalPKIXPublicKey(pubKey)
 	if err != nil {
 		return fmt.Errorf("failed to marshal public key: %w", err)
@@ -194,15 +174,15 @@ func (o *CreateInfraOptions) configureOIDC(s3Client s3iface.S3API, privKey *rsa.
 		return fmt.Errorf("failed to marshal KeyResponse: %w", err)
 	}
 
-	if _, err := s3Client.PutObject(&s3.PutObjectInput{
+	if _, err := s3client.PutObjectWithContext(ctx, &s3.PutObjectInput{
 		ACL:    aws.String("public-read"),
 		Body:   bytes.NewReader(jwks),
-		Bucket: aws.String(bucketName),
+		Bucket: aws.String(infra.OIDCBucketName),
 		Key:    aws.String(jwksKey),
 	}); err != nil {
 		return fmt.Errorf("failed to put jwks in bucket: %w", err)
 	}
-	log.Info("JWKS document updated", "bucket", bucketName)
+	log.Info("JWKS document updated", "bucket", infra.OIDCBucketName)
 
 	discoveryTemplate := `{
 	"issuer": "%s",
@@ -226,16 +206,17 @@ func (o *CreateInfraOptions) configureOIDC(s3Client s3iface.S3API, privKey *rsa.
 	]
 }`
 
-	discoveryJSON := fmt.Sprintf(discoveryTemplate, issuerURL, issuerURL, jwksKey)
-	if _, err := s3Client.PutObject(&s3.PutObjectInput{
+	discoveryJSON := fmt.Sprintf(discoveryTemplate, infra.OIDCIssuerURL, infra.OIDCIssuerURL, jwksKey)
+	if _, err := s3client.PutObjectWithContext(ctx, &s3.PutObjectInput{
 		ACL:    aws.String("public-read"),
 		Body:   aws.ReadSeekCloser(strings.NewReader(discoveryJSON)),
-		Bucket: aws.String(bucketName),
+		Bucket: aws.String(infra.OIDCBucketName),
 		Key:    aws.String(".well-known/openid-configuration"),
 	}); err != nil {
 		return fmt.Errorf("failed to put discovery JSON in bucket: %w", err)
 	}
-	log.Info("OIDC discovery document updated", "bucket", bucketName)
+	log.Info("OIDC discovery document updated", "bucket", infra.OIDCBucketName)
 
+	log.Info("Finished configuring OIDC support for infrastructure", "id", infra.ID)
 	return nil
 }

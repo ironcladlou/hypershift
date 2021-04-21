@@ -17,6 +17,7 @@ import (
 	hyperapi "github.com/openshift/hypershift/api"
 	hyperv1 "github.com/openshift/hypershift/api/v1alpha1"
 	awsinfra "github.com/openshift/hypershift/cmd/infra/aws"
+	"github.com/openshift/hypershift/cmd/infra/aws/provisioner"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +32,8 @@ type DestroyOptions struct {
 	Name               string
 	AWSCredentialsFile string
 	ClusterGracePeriod time.Duration
+	Provisioner        string
+	TerraformDir       string
 }
 
 func NewDestroyCommand() *cobra.Command {
@@ -44,12 +47,15 @@ func NewDestroyCommand() *cobra.Command {
 		Name:               "",
 		AWSCredentialsFile: "",
 		ClusterGracePeriod: 15 * time.Minute,
+		Provisioner:        provisioner.CloudFormationProvisionerType,
 	}
 
 	cmd.Flags().StringVar(&opts.Namespace, "namespace", opts.Namespace, "A cluster namespace")
 	cmd.Flags().StringVar(&opts.Name, "name", opts.Name, "A cluster name")
 	cmd.Flags().StringVar(&opts.AWSCredentialsFile, "aws-creds", opts.AWSCredentialsFile, "Path to an AWS credentials file (required)")
 	cmd.Flags().DurationVar(&opts.ClusterGracePeriod, "cluster-grace-period", opts.ClusterGracePeriod, "How long to wait for the cluster to be deleted before forcibly destroying its infra")
+	cmd.Flags().StringVar(&opts.Provisioner, "provisioner", opts.Provisioner, "One of: cloudformation, terraform")
+	cmd.Flags().StringVar(&opts.TerraformDir, "terraform-dir", opts.TerraformDir, "Path to a directory for the cluster's Terraform state")
 
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("aws-creds")
@@ -137,6 +143,8 @@ func DestroyCluster(ctx context.Context, o *DestroyOptions) error {
 		AWSCredentialsFile: o.AWSCredentialsFile,
 		Region:             hostedCluster.Spec.Platform.AWS.Region,
 		InfraID:            hostedCluster.Spec.InfraID,
+		Provisioner:        o.Provisioner,
+		TerraformDir:       o.TerraformDir,
 	}
 	err = destroyInfraOpts.DestroyInfra(ctx)
 	if err != nil {

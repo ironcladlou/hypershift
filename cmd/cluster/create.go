@@ -18,6 +18,7 @@ import (
 	apifixtures "github.com/openshift/hypershift/api/fixtures"
 	hyperv1 "github.com/openshift/hypershift/api/v1alpha1"
 	awsinfra "github.com/openshift/hypershift/cmd/infra/aws"
+	"github.com/openshift/hypershift/cmd/infra/aws/provisioner"
 	"github.com/openshift/hypershift/version"
 
 	cr "sigs.k8s.io/controller-runtime"
@@ -159,14 +160,14 @@ func CreateCluster(ctx context.Context, opts Options) error {
 	}
 
 	// Load or create infrastructure for the cluster
-	var infra *awsinfra.AWSInfrastructure
+	var infra *provisioner.AWSInfrastructure
 	if len(opts.InfrastructureJSON) > 0 {
 		// Load the specified infra spec from disk
 		rawInfra, err := ioutil.ReadFile(opts.InfrastructureJSON)
 		if err != nil {
 			return fmt.Errorf("failed to read infra json file: %w", err)
 		}
-		infra = &awsinfra.AWSInfrastructure{}
+		infra = &provisioner.AWSInfrastructure{}
 		if err = json.Unmarshal(rawInfra, infra); err != nil {
 			return fmt.Errorf("failed to load infra json: %w", err)
 		}
@@ -181,12 +182,13 @@ func CreateCluster(ctx context.Context, opts Options) error {
 		}
 		subdomain := fmt.Sprintf("%s-%s.%s", opts.Namespace, opts.Name, opts.BaseDomain)
 		opt := awsinfra.CreateInfraOptions{
+			Provisioner:        provisioner.CloudFormationProvisionerType,
 			AWSCredentialsFile: opts.AWSCredentialsFile,
 			InfraID:            infraID,
 			Region:             opts.Region,
 			BaseDomain:         opts.BaseDomain,
 			Subdomain:          subdomain,
-			DeleteOnFailure:    opts.DeleteOnFailure,
+			CFDeleteOnFailure:  opts.DeleteOnFailure,
 		}
 		newInfra, err := opt.Run(ctx)
 		if err != nil {
