@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 3.27"
     }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 3.1.0"
+    }
   }
 }
 
@@ -77,8 +81,9 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
-resource "aws_s3_bucket" "oidc_bucket" {
-  bucket = var.cluster_id
+resource "aws_s3_bucket" "oidc" {
+  bucket        = var.cluster_id
+  force_destroy = true
 
   tags = merge(
     { "Name" = "${var.cluster_id}-oidc" },
@@ -86,7 +91,7 @@ resource "aws_s3_bucket" "oidc_bucket" {
   )
 }
 
-resource "aws_iam_openid_connect_provider" "oidc_provider" {
+resource "aws_iam_openid_connect_provider" "oidc" {
   url = "https://s3.${var.aws_region}.amazonaws.com/${var.cluster_id}"
 
   client_id_list = [
@@ -103,7 +108,7 @@ resource "aws_iam_openid_connect_provider" "oidc_provider" {
   )
 }
 
-resource "aws_iam_role" "oidc_ingress_role" {
+resource "aws_iam_role" "oidc_ingress" {
   name = "${var.cluster_id}-oidc-ingress"
 
   assume_role_policy = jsonencode({
@@ -112,7 +117,7 @@ resource "aws_iam_role" "oidc_ingress_role" {
       {
         Effect = "Allow"
         Principal = {
-          Federated : aws_iam_openid_connect_provider.oidc_provider.arn
+          Federated : aws_iam_openid_connect_provider.oidc.arn
         }
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
@@ -149,7 +154,7 @@ resource "aws_iam_role" "oidc_ingress_role" {
   )
 }
 
-resource "aws_iam_role" "oidc_registry_role" {
+resource "aws_iam_role" "oidc_registry" {
   name = "${var.cluster_id}-oidc-registry"
 
   assume_role_policy = jsonencode({
@@ -158,7 +163,7 @@ resource "aws_iam_role" "oidc_registry_role" {
       {
         Effect = "Allow"
         Principal = {
-          Federated : aws_iam_openid_connect_provider.oidc_provider.arn
+          Federated : aws_iam_openid_connect_provider.oidc.arn
         }
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
@@ -209,7 +214,7 @@ resource "aws_iam_role" "oidc_registry_role" {
   )
 }
 
-resource "aws_iam_role" "oidc_csi_role" {
+resource "aws_iam_role" "oidc_csi" {
   name = "${var.cluster_id}-oidc-csi"
 
   assume_role_policy = jsonencode({
@@ -218,7 +223,7 @@ resource "aws_iam_role" "oidc_csi_role" {
       {
         Effect = "Allow"
         Principal = {
-          Federated : aws_iam_openid_connect_provider.oidc_provider.arn
+          Federated : aws_iam_openid_connect_provider.oidc.arn
         }
         Action = "sts:AssumeRoleWithWebIdentity"
         Condition = {
@@ -306,7 +311,7 @@ resource "aws_iam_role" "worker_role" {
   )
 }
 
-resource "aws_iam_instance_profile" "worker_instance_profile" {
+resource "aws_iam_instance_profile" "worker" {
   name = "${var.cluster_id}-worker"
   role = aws_iam_role.worker_role.name
 }
@@ -729,4 +734,104 @@ resource "aws_route53_record" "delegate" {
   type    = "NS"
   ttl     = "60"
   records = aws_route53_zone.public.name_servers
+}
+
+resource "tls_private_key" "service_account_signing" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+output "cluster_id" {
+  value = var.cluster_id
+}
+
+output "region" {
+  value = var.aws_region
+}
+
+output "az" {
+  value = data.aws_availability_zones.available.names[0]
+}
+
+output "base_domain_zone_id" {
+  value = var.base_domain_zone_id
+}
+
+output "cluster_domain" {
+  value = var.cluster_domain
+}
+
+output "public_zone_id" {
+  value = aws_route53_zone.public.id
+}
+
+output "private_zone_id" {
+  value = aws_route53_zone.private.id
+}
+
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+output "compute_cidr" {
+  value = aws_vpc.main.cidr_block
+}
+
+output "private_subnet_id" {
+  value = aws_subnet.private.id
+}
+
+output "public_subnet_id" {
+  value = aws_subnet.public.id
+}
+
+output "worker_sg_id" {
+  value = aws_security_group.worker.id
+}
+
+output "worker_instance_profile_id" {
+  value = aws_iam_instance_profile.worker.id
+}
+
+output "oidc_ingress_role_arn" {
+  value = aws_iam_role.oidc_ingress.id
+}
+
+output "oidc_registry_role_arn" {
+  value = aws_iam_role.oidc_registry.id
+}
+
+output "oidc_csi_role_arn" {
+  value = aws_iam_role.oidc_csi.id
+}
+
+output "oidc_issuer_url" {
+  value = aws_iam_openid_connect_provider.oidc.url
+}
+
+output "oidc_bucket_name" {
+  value = aws_s3_bucket.oidc.id
+}
+
+output "cloud_controller_access_key_id" {
+  value = aws_iam_access_key.cloud_controller.id
+}
+
+output "cloud_controller_access_key_secret" {
+  value     = aws_iam_access_key.cloud_controller.secret
+  sensitive = true
+}
+
+output "node_pool_access_key_id" {
+  value = aws_iam_access_key.node_pool.id
+}
+
+output "node_pool_access_key_secret" {
+  value     = aws_iam_access_key.node_pool.secret
+  sensitive = true
+}
+
+output "service_account_signing_key" {
+  value     = tls_private_key.service_account_signing.private_key_pem
+  sensitive = true
 }

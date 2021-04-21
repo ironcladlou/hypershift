@@ -159,14 +159,14 @@ func CreateCluster(ctx context.Context, opts Options) error {
 	}
 
 	// Load or create infrastructure for the cluster
-	var infra *awsinfra.CreateInfraOutput
+	var infra *awsinfra.AWSInfrastructure
 	if len(opts.InfrastructureJSON) > 0 {
 		// Load the specified infra spec from disk
 		rawInfra, err := ioutil.ReadFile(opts.InfrastructureJSON)
 		if err != nil {
 			return fmt.Errorf("failed to read infra json file: %w", err)
 		}
-		infra = &awsinfra.CreateInfraOutput{}
+		infra = &awsinfra.AWSInfrastructure{}
 		if err = json.Unmarshal(rawInfra, infra); err != nil {
 			return fmt.Errorf("failed to load infra json: %w", err)
 		}
@@ -204,7 +204,7 @@ func CreateCluster(ctx context.Context, opts Options) error {
 		IssuerURL:        infra.OIDCIssuerURL,
 		SSHKey:           sshKey,
 		NodePoolReplicas: opts.NodePoolReplicas,
-		InfraID:          infra.InfraID,
+		InfraID:          infra.ID,
 		ComputeCIDR:      infra.ComputeCIDR,
 		BaseDomain:       infra.Subdomain,
 		PublicZoneID:     infra.SubdomainPublicZoneID,
