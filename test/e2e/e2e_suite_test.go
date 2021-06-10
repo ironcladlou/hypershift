@@ -6,31 +6,23 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
-	"github.com/aws/aws-sdk-go/service/elb"
-	"github.com/aws/aws-sdk-go/service/elb/elbiface"
-	"github.com/aws/aws-sdk-go/service/iam"
-	"github.com/aws/aws-sdk-go/service/iam/iamiface"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
+	"github.com/bombsimon/logrusr"
+	"github.com/go-logr/logr"
+	"github.com/openshift/hypershift/test/e2e/cliworkflow"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/errors"
 
-	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 	"github.com/openshift/hypershift/version"
 )
 
-// GlobalTestContext should be used as the parent context for any test code, and will
-// be cancelled if a SIGINT or SIGTERM is received.
-var GlobalTestContext context.Context
+var log = logrusr.NewLogger(logrus.New())
 
-type GlobalTestOptions struct {
+type options struct {
 	AWSCredentialsFile   string
 	Region               string
 	PullSecretFile       string
@@ -40,26 +32,21 @@ type GlobalTestOptions struct {
 	UpgradeTestsEnabled  bool
 	ArtifactDir          string
 	BaseDomain           string
-
-	EC2Client     ec2iface.EC2API
-	Route53Client route53iface.Route53API
-	ELBClient     elbiface.ELBAPI
-	IAMClient     iamiface.IAMAPI
 }
 
-var GlobalOptions = &GlobalTestOptions{}
+var opts = &options{}
 
 func init() {
-	flag.StringVar(&GlobalOptions.AWSCredentialsFile, "e2e.aws-credentials-file", "", "path to AWS credentials")
-	flag.StringVar(&GlobalOptions.Region, "e2e.aws-region", "us-east-1", "AWS region for clusters")
-	flag.StringVar(&GlobalOptions.PullSecretFile, "e2e.pull-secret-file", "", "path to pull secret")
-	flag.StringVar(&GlobalOptions.LatestReleaseImage, "e2e.latest-release-image", "", "The latest OCP release image for use by tests")
-	flag.StringVar(&GlobalOptions.PreviousReleaseImage, "e2e.previous-release-image", "", "The previous OCP release image relative to the latest")
-	flag.StringVar(&GlobalOptions.ArtifactDir, "e2e.artifact-dir", "", "The directory where cluster resources and logs should be dumped. If empty, nothing is dumped")
-	flag.StringVar(&GlobalOptions.BaseDomain, "e2e.base-domain", "", "The ingress base domain for the cluster")
+	flag.StringVar(&opts.AWSCredentialsFile, "e2e.aws-credentials-file", "", "path to AWS credentials")
+	flag.StringVar(&opts.Region, "e2e.aws-region", "us-east-1", "AWS region for clusters")
+	flag.StringVar(&opts.PullSecretFile, "e2e.pull-secret-file", "", "path to pull secret")
+	flag.StringVar(&opts.LatestReleaseImage, "e2e.latest-release-image", "", "The latest OCP release image for use by tests")
+	flag.StringVar(&opts.PreviousReleaseImage, "e2e.previous-release-image", "", "The previous OCP release image relative to the latest")
+	flag.StringVar(&opts.ArtifactDir, "e2e.artifact-dir", "", "The directory where cluster resources and logs should be dumped. If empty, nothing is dumped")
+	flag.StringVar(&opts.BaseDomain, "e2e.base-domain", "", "The ingress base domain for the cluster")
 }
 
-func (o *GlobalTestOptions) SetDefaults() error {
+func (o *options) SetDefaults() error {
 	if len(o.LatestReleaseImage) == 0 {
 		defaultVersion, err := version.LookupDefaultOCPVersion()
 		if err != nil {
@@ -88,17 +75,10 @@ func (o *GlobalTestOptions) SetDefaults() error {
 		}
 	}
 
-	awsSession := awsutil.NewSession()
-	awsConfig := awsutil.NewConfig(o.AWSCredentialsFile, o.Region)
-	o.IAMClient = iam.New(awsSession, awsConfig)
-	o.EC2Client = ec2.New(awsSession, awsConfig)
-	o.ELBClient = elb.New(awsSession, awsConfig)
-	o.Route53Client = route53.New(awsSession, awsutil.NewRoute53Config(o.AWSCredentialsFile))
-
 	return nil
 }
 
-func (o *GlobalTestOptions) Validate() error {
+func (o *options) Validate() error {
 	var errs []error
 
 	if len(o.LatestReleaseImage) == 0 {
@@ -112,29 +92,64 @@ func (o *GlobalTestOptions) Validate() error {
 	return errors.NewAggregate(errs)
 }
 
-func TestMain(m *testing.M) {
-	ctx, cancel := context.WithCancel(context.Background())
-	GlobalTestContext = ctx
+// rootContext should be used as the parent context for any test code, and will
+// be cancelled if a SIGINT or SIGTERM is received.
+var rootContext context.Context
 
+func TestMain(m *testing.M) {
+	// Bind flags to the test options
+	flag.Parse()
+
+	// Set defaults for the test options
+	if err := opts.SetDefaults(); err != nil {
+		log.Error(err, "failed to set up global test options")
+		os.Exit(1)
+	}
+
+	// Validate the test options
+	if err := opts.Validate(); err != nil {
+		log.Error(err, "invalid global test options")
+		os.Exit(1)
+	}
+
+	// Set up a root context for all tests and set up signal handling
+	ctx, cancel := context.WithCancel(context.Background())
+	rootContext = ctx
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigs
-		log.Printf("tests received shutdown signal and will be cancelled")
+		log.Info("tests received shutdown signal and will be cancelled")
 		cancel()
 	}()
 
-	flag.Parse()
-
-	if err := GlobalOptions.SetDefaults(); err != nil {
-		log.Fatalf("failed to set up global test options: %s", err)
-	}
-
-	if err := GlobalOptions.Validate(); err != nil {
-		log.Fatalf("invalid global test options: %s", err)
-	}
-
-	log.Printf("Running e2e tests with global options: %#v", GlobalOptions)
-
+	// Everything's okay to run tests
+	log.Info("Running e2e tests", "options", opts)
 	os.Exit(m.Run())
+}
+
+// SuiteTest is what individual implementations should conform to.
+type SuiteTest interface {
+	New(ctx context.Context, log logr.Logger) (string, func(t *testing.T))
+}
+
+// TestSuite runs all the e2e tests. Any new tests need to be added to this
+// list in order for them to run.
+func TestSuite(t *testing.T) {
+	tests := []SuiteTest{
+		cliworkflow.CreateClusterTest{
+			AWSCredentialsFile: opts.AWSCredentialsFile,
+			AWSRegion:          opts.Region,
+			PullSecretFile:     opts.PullSecretFile,
+			ReleaseImage:       opts.LatestReleaseImage,
+			ArtifactDir:        opts.ArtifactDir,
+			BaseDomain:         opts.BaseDomain,
+		},
+	}
+
+	for i := range tests {
+		test := tests[i]
+		name, testFn := test.New(rootContext, log)
+		t.Run(name, testFn)
+	}
 }

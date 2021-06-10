@@ -1,12 +1,17 @@
-package e2e
+package util
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/elb"
+	"github.com/aws/aws-sdk-go/service/iam"
+	"github.com/aws/aws-sdk-go/service/route53"
 	. "github.com/onsi/gomega"
 	configv1 "github.com/openshift/api/config/v1"
+	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,11 +43,11 @@ func GenerateNamespace(t *testing.T, ctx context.Context, client crclient.Client
 	return namespace
 }
 
-func DestroyCluster(t *testing.T, ctx context.Context, opts *cmdcluster.DestroyOptions, artifactDir string) {
+func DumpCluster(t *testing.T, ctx context.Context, hostedCluster *hyperv1.HostedCluster, artifactDir string) {
 	if len(artifactDir) > 0 {
 		err := cmdcluster.DumpCluster(ctx, &cmdcluster.DumpOptions{
-			Namespace:   opts.Namespace,
-			Name:        opts.Name,
+			Namespace:   hostedCluster.Namespace,
+			Name:        hostedCluster.Name,
 			ArtifactDir: artifactDir,
 		})
 		if err != nil {
@@ -50,9 +55,81 @@ func DestroyCluster(t *testing.T, ctx context.Context, opts *cmdcluster.DestroyO
 		}
 	}
 
+	awsSession := awsutil.NewSession()
+	awsConfig := awsutil.NewConfig(awsCreds, awsRegion)
+	iamClient := iam.New(awsSession, awsConfig)
+	ec2Client := ec2.New(awsSession, awsConfig)
+	elbClient := elb.New(awsSession, awsConfig)
+	route53Client := route53.New(awsSession, awsutil.NewRoute53Config(awsCreds))
+
+	opts := &cmdcluster.DestroyOptions{
+		Namespace:          hostedCluster.Namespace,
+		Name:               hostedCluster.Name,
+		Region:             awsRegion,
+		InfraID:            hostedCluster.Name,
+		BaseDomain:         baseDomain,
+		AWSCredentialsFile: awsCreds,
+		EC2Client:          ec2Client,
+		Route53Client:      route53Client,
+		ELBClient:          elbClient,
+		IAMClient:          iamClient,
+		PreserveIAM:        false,
+		ClusterGracePeriod: 15 * time.Minute,
+	}
+
+	t.Logf("Waiting for hostedcluster %s/%s to be destroyed", hostedCluster.Namespace, hostedCluster.Name)
+	err := wait.PollImmediateUntil(5*time.Second, func() (bool, error) {
+		err := cmdcluster.DestroyCluster(ctx, opts)
+		if err != nil {
+			t.Logf("error destroying cluster, will retry: %s", err)
+			return false, nil
+		}
+		return true, nil
+	}, ctx.Done())
+	g.Expect(err).NotTo(HaveOccurred(), "failed to destroy cluster")
+
+	t.Logf("Finished destroying hostedcluster %s/%s", opts.Namespace, opts.Name)
+}
+
+func DumpAndDestroyCluster(t *testing.T, ctx context.Context, hostedCluster *hyperv1.HostedCluster,
+	awsCreds string, awsRegion string, baseDomain string, artifactDir string) {
+
 	g := NewWithT(t)
 
-	t.Logf("Waiting for hostedcluster %s/%s to be destroyed", opts.Namespace, opts.Name)
+	if len(artifactDir) > 0 {
+		err := cmdcluster.DumpCluster(ctx, &cmdcluster.DumpOptions{
+			Namespace:   hostedCluster.Namespace,
+			Name:        hostedCluster.Name,
+			ArtifactDir: artifactDir,
+		})
+		if err != nil {
+			t.Logf("error dumping cluster contents: %s", err)
+		}
+	}
+
+	awsSession := awsutil.NewSession()
+	awsConfig := awsutil.NewConfig(awsCreds, awsRegion)
+	iamClient := iam.New(awsSession, awsConfig)
+	ec2Client := ec2.New(awsSession, awsConfig)
+	elbClient := elb.New(awsSession, awsConfig)
+	route53Client := route53.New(awsSession, awsutil.NewRoute53Config(awsCreds))
+
+	opts := &cmdcluster.DestroyOptions{
+		Namespace:          hostedCluster.Namespace,
+		Name:               hostedCluster.Name,
+		Region:             awsRegion,
+		InfraID:            hostedCluster.Name,
+		BaseDomain:         baseDomain,
+		AWSCredentialsFile: awsCreds,
+		EC2Client:          ec2Client,
+		Route53Client:      route53Client,
+		ELBClient:          elbClient,
+		IAMClient:          iamClient,
+		PreserveIAM:        false,
+		ClusterGracePeriod: 15 * time.Minute,
+	}
+
+	t.Logf("Waiting for hostedcluster %s/%s to be destroyed", hostedCluster.Namespace, hostedCluster.Name)
 	err := wait.PollImmediateUntil(5*time.Second, func() (bool, error) {
 		err := cmdcluster.DestroyCluster(ctx, opts)
 		if err != nil {
