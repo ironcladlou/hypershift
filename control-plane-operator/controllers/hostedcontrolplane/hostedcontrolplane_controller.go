@@ -7,14 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-
-	"github.com/openshift/api/operator/v1alpha1"
-	"sigs.k8s.io/cluster-api/util/annotations"
-
 	"math/big"
 	"math/rand"
 	"net/url"
 	"time"
+
+	"github.com/openshift/api/operator/v1alpha1"
+	"sigs.k8s.io/cluster-api/util/annotations"
 
 	"github.com/go-logr/logr"
 	configv1 "github.com/openshift/api/config/v1"
@@ -50,7 +49,7 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/common"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/config"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/cvo"
-	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/etcd"
+	etcd "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/etcd"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/ingress"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kas"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kcm"
@@ -63,7 +62,6 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/render"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/scheduler"
 	cpoutil "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/util"
-	etcdv1 "github.com/openshift/hypershift/control-plane-operator/thirdparty/etcd/v1beta2"
 	"github.com/openshift/hypershift/support/releaseinfo"
 )
 
@@ -118,9 +116,9 @@ func (r *HostedControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewItemExponentialFailureRateLimiter(1*time.Second, 10*time.Second),
 		}).
-		Watches(&source.Kind{Type: &etcdv1.EtcdCluster{}}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
 		Watches(&source.Kind{Type: &corev1.Service{}}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
 		Watches(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
+		Watches(&source.Kind{Type: &appsv1.StatefulSet{}}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
 		Watches(&source.Kind{Type: &corev1.Secret{}}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
 		Watches(&source.Channel{Source: r.HostedAPICache.Events()}, &handler.EnqueueRequestForOwner{OwnerType: &hyperv1.HostedControlPlane{}}).
 		Build(r)
@@ -196,31 +194,18 @@ func (r *HostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		switch hostedControlPlane.Spec.Etcd.ManagementType {
 		case hyperv1.Managed:
 			r.Log.Info("Reconciling etcd cluster status for managed strategy")
-			etcdCluster := manifests.EtcdCluster(hostedControlPlane.Namespace)
-			if err := r.Get(ctx, types.NamespacedName{Namespace: etcdCluster.Namespace, Name: etcdCluster.Name}, etcdCluster); err != nil {
-				if apierrors.IsNotFound(err) {
-					newCondition = metav1.Condition{
-						Type:   string(hyperv1.EtcdAvailable),
-						Status: metav1.ConditionFalse,
-						Reason: "EtcdClusterNotFound",
-					}
-				} else {
-					return ctrl.Result{}, fmt.Errorf("failed to fetch etcd cluster %s/%s: %w", etcdCluster.Namespace, etcdCluster.Name, err)
-				}
-			} else {
-				r.Log.Info("Computing proper etcd cluster status based on current state of etcd cluster")
-				cond, err := etcd.ComputeEtcdClusterStatus(ctx, r.Client, etcdCluster)
-				if err != nil {
-					return ctrl.Result{}, fmt.Errorf("failed to compute etcd cluster status: %w", err)
-				}
-				newCondition = cond
+			newCondition = metav1.Condition{
+				Type:    string(hyperv1.EtcdAvailable),
+				Status:  metav1.ConditionTrue,
+				Reason:  "EtcdRunning",
+				Message: "Etcd cluster is running",
 			}
 		case hyperv1.Unmanaged:
 			r.Log.Info("Assuming Etcd cluster is running in unmanaged etcd strategy")
 			newCondition = metav1.Condition{
 				Type:    string(hyperv1.EtcdAvailable),
 				Status:  metav1.ConditionTrue,
-				Reason:  etcd.EtcdReasonRunning,
+				Reason:  "EtcdRunning",
 				Message: "Etcd cluster is assumed to be running in unmanaged state",
 			}
 		}
@@ -1225,65 +1210,43 @@ func (r *HostedControlPlaneReconciler) reconcileCloudProviderConfig(ctx context.
 func (r *HostedControlPlaneReconciler) reconcileManagedEtcd(ctx context.Context, hcp *hyperv1.HostedControlPlane, releaseImage *releaseinfo.ReleaseImage) error {
 	p := etcd.NewEtcdParams(hcp, releaseImage.ComponentImages())
 
-	// Etcd Operator ServiceAccount
-	operatorServiceAccount := manifests.EtcdOperatorServiceAccount(hcp.Namespace)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorServiceAccount, func() error {
-		return etcd.ReconcileOperatorServiceAccount(operatorServiceAccount, p.OwnerRef)
+	operatorPeerService := manifests.EtcdOperatorPeerService(hcp.Namespace)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorPeerService, func() error {
+		return etcd.ReconcileOperatorPeerService(operatorPeerService, p.OwnerRef)
 	}); err != nil {
-		return fmt.Errorf("failed to reconcile etcd operator service account: %w", err)
+		return fmt.Errorf("failed to reconcile etcd operator peer service: %w", err)
 	}
 
-	// Etcd operator role
-	operatorRole := manifests.EtcdOperatorRole(hcp.Namespace)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorRole, func() error {
-		return etcd.ReconcileOperatorRole(operatorRole, p.OwnerRef)
+	operatorClientService := manifests.EtcdOperatorClientService(hcp.Namespace)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorClientService, func() error {
+		return etcd.ReconcileOperatorClientService(operatorClientService, p.OwnerRef)
 	}); err != nil {
-		return fmt.Errorf("failed to reconcile etcd operator role: %w", err)
+		return fmt.Errorf("failed to reconcile etcd operator client service: %w", err)
 	}
 
-	// Etcd operator rolebinding
-	operatorRoleBinding := manifests.EtcdOperatorRoleBinding(hcp.Namespace)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorRoleBinding, func() error {
-		return etcd.ReconcileOperatorRoleBinding(operatorRoleBinding, p.OwnerRef)
+	operatorConfig := manifests.EtcdOperatorConfigMap(hcp.Namespace)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorConfig, func() error {
+		return etcd.ReconcileOperatorConfig(operatorConfig, p.OwnerRef)
 	}); err != nil {
-		return fmt.Errorf("failed to reconcile etcd operator role binding: %w", err)
+		return fmt.Errorf("failed to reconcile etcd operator configmap: %w", err)
+	}
+
+	operatorServiceMonitor := manifests.EtcdServiceMonitor(hcp.Namespace)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorServiceMonitor, func() error {
+		return etcd.ReconcileOperatorServiceMonitor(operatorServiceMonitor, p.OwnerRef)
+	}); err != nil {
+		return fmt.Errorf("failed to reconcile etcd operator servicemonitor: %w", err)
 	}
 
 	// Etcd operator deployment
-	operatorDeployment := manifests.EtcdOperatorDeployment(hcp.Namespace)
-	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorDeployment, func() error {
-		return etcd.ReconcileOperatorDeployment(operatorDeployment, p.OwnerRef, p.OperatorDeploymentConfig, p.EtcdOperatorImage)
+	operatorStatefulSet := manifests.EtcdOperatorStatefulSet(hcp.Namespace)
+	if _, err := controllerutil.CreateOrUpdate(ctx, r, operatorStatefulSet, func() error {
+		return etcd.ReconcileOperatorStatefulSet(operatorStatefulSet, p.OwnerRef, p.OperatorDeploymentConfig, p.EtcdOperatorImage)
 	}); err != nil {
-		return fmt.Errorf("failed to reconcile etcd operator deployment: %w", err)
+		return fmt.Errorf("failed to reconcile etcd operator statefulset: %w", err)
 	}
+	r.Log.Info("reconciled etcd operator statefulset")
 
-	// Etcd cluster
-	etcdCluster := manifests.EtcdCluster(hcp.Namespace)
-
-	// The EtcdCluster can currently enter a permanently failed state, so when
-	// that's detected, delete the EtcdCluster and start over.
-	// TODO(dmace): Fix this in the etcd operator and delete this code
-	shouldDeleteFailedEtcd := false
-	for _, cond := range hcp.Status.Conditions {
-		if cond.Type == string(hyperv1.EtcdAvailable) && cond.Status == metav1.ConditionFalse && cond.Reason == etcd.EtcdReasonFailed {
-			shouldDeleteFailedEtcd = true
-			break
-		}
-	}
-	if shouldDeleteFailedEtcd {
-		if err := r.Delete(ctx, etcdCluster); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return fmt.Errorf("failed to delete etcd cluster: %w", err)
-			}
-		}
-	}
-
-	if _, err := controllerutil.CreateOrUpdate(ctx, r, etcdCluster, func() error {
-		etcdCluster.OwnerReferences = ensureHCPOwnerRef(hcp, etcdCluster.OwnerReferences)
-		return etcd.ReconcileCluster(etcdCluster, p.OwnerRef, p.EtcdDeploymentConfig, p.ClusterVersion, p.PersistentVolumeClaimSpec)
-	}); err != nil {
-		return fmt.Errorf("failed to reconcile etcd cluster: %w", err)
-	}
 	return nil
 }
 

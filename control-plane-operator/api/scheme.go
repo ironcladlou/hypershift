@@ -20,7 +20,6 @@ import (
 
 	capiibm "github.com/kubernetes-sigs/cluster-api-provider-ibmcloud/api/v1alpha4"
 	openshiftcpv1 "github.com/openshift/api/openshiftcontrolplane/v1"
-	etcd "github.com/openshift/hypershift/control-plane-operator/thirdparty/etcd/v1beta2"
 	capiaws "sigs.k8s.io/cluster-api-provider-aws/api/v1alpha4"
 	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha4"
 
@@ -58,7 +57,6 @@ func init() {
 	rbacv1.AddToScheme(Scheme)
 	corev1.AddToScheme(Scheme)
 	apiextensionsv1.AddToScheme(Scheme)
-	etcd.AddToScheme(Scheme)
 	kasv1beta1.AddToScheme(Scheme)
 	openshiftcpv1.AddToScheme(Scheme)
 	v1alpha1.AddToScheme(Scheme)

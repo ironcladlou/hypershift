@@ -10,12 +10,10 @@ import (
 )
 
 type EtcdParams struct {
-	ClusterVersion            string
-	EtcdOperatorImage         string
-	OwnerRef                  config.OwnerRef `json:"ownerRef"`
-	OperatorDeploymentConfig  config.DeploymentConfig
-	EtcdDeploymentConfig      config.DeploymentConfig
-	PersistentVolumeClaimSpec *corev1.PersistentVolumeClaimSpec `json:"persistentVolumeClaimSpec"`
+	ClusterVersion           string
+	EtcdOperatorImage        string
+	OwnerRef                 config.OwnerRef `json:"ownerRef"`
+	OperatorDeploymentConfig config.DeploymentConfig
 }
 
 var etcdLabels = map[string]string{
@@ -36,29 +34,25 @@ func NewEtcdParams(hcp *hyperv1.HostedControlPlane, images map[string]string) *E
 			},
 		},
 	}
+	p.OperatorDeploymentConfig.SetMultizoneSpread(etcdOperatorDeploymentLabels)
 	p.OperatorDeploymentConfig.SetRestartAnnotation(hcp.ObjectMeta)
 	p.OperatorDeploymentConfig.SetControlPlaneIsolation(hcp)
-	p.EtcdDeploymentConfig.Resources = config.ResourcesSpec{
-		etcdContainer().Name: {
+	p.OperatorDeploymentConfig.Resources = config.ResourcesSpec{
+		etcdOperatorContainer().Name: {
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resource.MustParse("600Mi"),
 				corev1.ResourceCPU:    resource.MustParse("300m"),
 			},
 		},
 	}
-	p.EtcdDeploymentConfig.SetColocationAnchor(hcp)
-	p.EtcdDeploymentConfig.SetControlPlaneIsolation(hcp)
-	p.EtcdDeploymentConfig.Scheduling.PriorityClass = config.EtcdPriorityClass
-	p.OperatorDeploymentConfig.Replicas = 1
+	p.OperatorDeploymentConfig.SetColocationAnchor(hcp)
+	p.OperatorDeploymentConfig.SetControlPlaneIsolation(hcp)
 	switch hcp.Spec.ControllerAvailabilityPolicy {
 	case hyperv1.HighlyAvailable:
-		p.EtcdDeploymentConfig.Replicas = 3
-		p.EtcdDeploymentConfig.SetMultizoneSpread(etcdLabels)
+		p.OperatorDeploymentConfig.Replicas = 3
+		p.OperatorDeploymentConfig.SetMultizoneSpread(etcdLabels)
 	default:
-		p.EtcdDeploymentConfig.Replicas = 1
-	}
-	if hcp.Spec.Etcd.ManagementType == hyperv1.Managed && hcp.Spec.Etcd.Managed != nil {
-		p.PersistentVolumeClaimSpec = hcp.Spec.Etcd.Managed.PersistentVolumeClaimSpec
+		p.OperatorDeploymentConfig.Replicas = 1
 	}
 	return p
 }

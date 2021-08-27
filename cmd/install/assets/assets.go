@@ -16,7 +16,6 @@ import (
 //go:embed cluster-api/*
 //go:embed cluster-api-provider-aws/*
 //go:embed cluster-api-provider-ibmcloud/*
-//go:embed etcd/*
 var crds embed.FS
 
 const capiLabel = "cluster.x-k8s.io/v1alpha4"

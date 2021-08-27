@@ -3,53 +3,51 @@ package manifests
 import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	etcdv1 "github.com/openshift/hypershift/control-plane-operator/thirdparty/etcd/v1beta2"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-func EtcdOperatorServiceAccount(ns string) *corev1.ServiceAccount {
-	return &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd-operator",
-			Namespace: ns,
-		},
-	}
-}
-
-func EtcdOperatorRole(ns string) *rbacv1.Role {
-	return &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd-operator",
-			Namespace: ns,
-		},
-	}
-}
-
-func EtcdOperatorRoleBinding(ns string) *rbacv1.RoleBinding {
-	return &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd-operator",
-			Namespace: ns,
-		},
-	}
-}
-
-func EtcdOperatorDeployment(ns string) *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "etcd-operator",
-			Namespace: ns,
-		},
-	}
-}
-
-func EtcdCluster(ns string) *etcdv1.EtcdCluster {
-	return &etcdv1.EtcdCluster{
+func EtcdOperatorStatefulSet(ns string) *appsv1.StatefulSet {
+	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "etcd",
 			Namespace: ns,
 		},
 	}
+}
+
+func EtcdOperatorPeerService(ns string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd-peer",
+			Namespace: ns,
+		},
+	}
+}
+
+func EtcdOperatorClientService(ns string) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd-client",
+			Namespace: ns,
+		},
+	}
+}
+
+func EtcdOperatorConfigMap(ns string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "etcd-operator",
+			Namespace: ns,
+		},
+	}
+}
+
+func EtcdServiceMonitor(ns string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion("monitoring.coreos.com/v1")
+	obj.SetKind("ServiceMonitor")
+	obj.SetName("etcd")
+	obj.SetNamespace(ns)
+	return obj
 }
