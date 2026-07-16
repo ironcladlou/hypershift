@@ -105,8 +105,10 @@ func NewPlatformConfig(platform, sharedDir string) (PlatformConfig, error) {
 	switch platform {
 	case "azure", "":
 		return NewAzurePlatformConfig(sharedDir), nil
+	case "aws":
+		return NewAWSPlatformConfig(sharedDir), nil
 	default:
-		return nil, fmt.Errorf("unsupported platform %q (supported: azure)", platform)
+		return nil, fmt.Errorf("unsupported platform %q (supported: azure, aws)", platform)
 	}
 }
 
