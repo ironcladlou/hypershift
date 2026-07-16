@@ -1,0 +1,79 @@
+[env]
+PROW_JOB_ID = "{{.ProwJobID}}"
+SHARED_DIR = "{{"{{"}}config_root{{"}}"}}/shared"
+ARTIFACT_DIR = "{{"{{"}}config_root{{"}}"}}/artifacts"
+RELEASE_IMAGE_LATEST = "{{.ReleaseImage}}"
+HYPERSHIFT_PLATFORM = "{{.Platform}}"
+HYPERSHIFT_BASE_DOMAIN = "{{.BaseDomain}}"
+HYPERSHIFT_NAMESPACE = "{{.Namespace}}"
+HYPERSHIFT_NODE_COUNT = "{{.NodeCount}}"
+HYPERSHIFT_BINARY = "{{.BinDir}}/hypershift"
+E2EV2_BIN_DIR = "{{.BinDir}}"
+{{- range .PlatformEnv}}
+{{.Key}} = "{{.Value}}"
+{{- end}}
+{{- if .Variants}}
+HYPERSHIFT_VARIANTS = "{{.Variants}}"
+{{- end}}
+{{- if .N1Image}}
+OCP_IMAGE_N1 = "{{.N1Image}}"
+{{- end}}
+{{- if .Kubeconfig}}
+KUBECONFIG = "{{.Kubeconfig}}"
+{{- end}}
+{{- if .PullSecret}}
+PULL_SECRET = "{{.PullSecret}}"
+{{- end}}
+{{- range .Clusters}}
+CLUSTER_NAME_{{.EnvSuffix}} = "{{.Name}}"
+CLUSTER_INFRA_ID_{{.EnvSuffix}} = "{{.Name}}"
+{{- end}}
+CLUSTER_VARIANTS = "{{range $i, $c := .Clusters}}{{if $i}} {{end}}{{$c.Variant}}:{{$c.Name}}{{end}}"
+
+[tasks.create]
+description = "Create hosted clusters"
+run = "sh scripts/exec.sh bash scripts/create.sh"
+
+[tasks.test]
+description = "Run e2e tests (orchestrated)"
+usage = '''
+flag "--filter <filter>" help="Override Ginkgo label filter for all test groups" default="!lifecycle"
+arg "[args]..." help="Additional args passed to the test runner"
+'''
+run = "sh scripts/exec.sh bash scripts/test.sh \"$usage_filter\" $usage_args"
+
+[tasks.destroy]
+description = "Destroy hosted clusters"
+run = "sh scripts/exec.sh bash scripts/destroy.sh"
+
+[tasks.dump]
+description = "Dump all clusters"
+run = "sh scripts/exec.sh bash scripts/dump.sh"
+{{range .Clusters}}
+[tasks."dump:{{.Variant}}"]
+description = "Dump diagnostics for {{.Name}}"
+run = "sh scripts/exec.sh bash scripts/dump-variant.sh {{.Variant}} {{.Name}} {{$.Namespace}}"
+{{end}}
+
+[tasks.sync]
+description = "Sync per-cluster directories with kubeconfigs and scoped environments"
+run = "sh scripts/exec.sh bash scripts/sync.sh"
+
+[tasks.all]
+description = "Build, create, test, destroy"
+run = "sh scripts/exec.sh bash scripts/all.sh"
+{{range .TestVariants}}
+[tasks."test:{{.Variant}}"]
+description = "Run tests against cluster {{.ClusterName}}"
+usage = '''
+flag "--filter <filter>" help="Ginkgo label filter"
+arg "[args]..." help="Additional args passed to the test binary"
+'''
+run = "sh scripts/exec.sh bash scripts/test-variant.sh {{.Variant}} \"$usage_filter\" $usage_args"
+[tasks."test:{{.Variant}}".env]
+E2E_HOSTED_CLUSTER_NAME = "{{.ClusterName}}"
+E2E_HOSTED_CLUSTER_NAMESPACE = "{{$.Namespace}}"
+{{- range .ExtraEnv}}
+{{.Key}} = "{{.Value}}"
+{{- end}}
+{{end}}
