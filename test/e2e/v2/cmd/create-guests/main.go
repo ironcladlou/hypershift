@@ -79,6 +79,9 @@ type envConfig struct {
 	etcdSC      string
 	pullSecret  string
 
+	variants string
+	infraID  string
+
 	platform         lifecycle.PlatformConfig
 	hypershiftBinary string
 	waitTimeout      time.Duration
@@ -117,6 +120,9 @@ func loadEnvConfig() envConfig {
 		etcdSC:      os.Getenv("HYPERSHIFT_ETCD_STORAGE_CLASS"),
 		pullSecret:  envOrDefault("PULL_SECRET", "/etc/ci-pull-credentials/.dockerconfigjson"),
 
+		variants: os.Getenv("HYPERSHIFT_VARIANTS"),
+		infraID:  os.Getenv("HYPERSHIFT_INFRA_ID"),
+
 		platform:         platform,
 		hypershiftBinary: envOrDefault("HYPERSHIFT_BINARY", "hypershift"),
 		waitTimeout:      45 * time.Minute,
@@ -130,7 +136,7 @@ func loadEnvConfig() envConfig {
 }
 
 func run(ctx context.Context, cfg envConfig) error {
-	specs := cfg.platform.ClusterSpecs(cfg.releaseImage, cfg.n1Image)
+	specs := lifecycle.FilterClusterSpecs(cfg.platform.ClusterSpecs(cfg.releaseImage, cfg.n1Image), cfg.variants)
 
 	// Derive cluster names and build the name map.
 	named := make([]namedSpec, len(specs))
@@ -251,6 +257,7 @@ func buildCreateArgs(cfg envConfig, name string, spec lifecycle.ClusterSpec) []s
 	args := []string{
 		"create", "cluster", cfg.platform.Name(),
 		"--name=" + name,
+		"--namespace=" + cfg.namespace,
 		"--node-pool-replicas=" + strconv.Itoa(cfg.nodeCount),
 		"--base-domain=" + cfg.baseDomain,
 		"--pull-secret=" + cfg.pullSecret,
@@ -258,6 +265,9 @@ func buildCreateArgs(cfg envConfig, name string, spec lifecycle.ClusterSpec) []s
 		"--generate-ssh",
 	}
 
+	if cfg.infraID != "" {
+		args = append(args, "--infra-id="+cfg.infraID)
+	}
 	if cfg.externalDNS != "" {
 		args = append(args, "--external-dns-domain="+cfg.externalDNS)
 	}
