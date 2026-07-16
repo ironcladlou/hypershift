@@ -508,6 +508,10 @@ e2ev2-destroy-guests:
 e2ev2-dump-guests:
 	$(GO_BUILD_RECIPE) -tags e2ev2 -o bin/dump-guests ./test/e2e/v2/cmd/dump-guests
 
+.PHONY: e2e-env
+e2e-env:
+	$(GO_BUILD_RECIPE) -tags e2ev2 -o bin/e2e-env ./test/e2e/v2/cmd/env
+
 .PHONY: backuprestore-e2e
 backuprestore-e2e:
 	$(GO_BACKUPRESTORE_E2E_RECIPE) -o bin/test-backuprestore ./test/e2e/v2/tests

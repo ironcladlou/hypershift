@@ -32,7 +32,10 @@ import (
 	"github.com/openshift/hypershift/test/e2e/v2/lifecycle"
 )
 
-const clusterGracePeriod = "40m"
+const (
+	clusterGracePeriod = "40m"
+	defaultNamespace   = "clusters"
+)
 
 func main() {
 	prowJobID := os.Getenv("PROW_JOB_ID")
@@ -52,7 +55,17 @@ func main() {
 		hypershiftBin = "hypershift"
 	}
 
-	specs := platform.ClusterSpecs("", "")
+	namespace := os.Getenv("HYPERSHIFT_NAMESPACE")
+	if namespace == "" {
+		namespace = defaultNamespace
+	}
+
+	baseDomain := os.Getenv("HYPERSHIFT_BASE_DOMAIN")
+	if baseDomain == "" {
+		baseDomain = platform.DefaultBaseDomain()
+	}
+
+	specs := lifecycle.FilterClusterSpecs(platform.ClusterSpecs("", ""), os.Getenv("HYPERSHIFT_VARIANTS"))
 
 	log.Printf("Destroying %d clusters derived from PROW_JOB_ID=%s", len(specs), prowJobID)
 
@@ -67,7 +80,7 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := destroyCluster(hypershiftBin, clusterName, spec.Variant, platform); err != nil {
+			if err := destroyCluster(hypershiftBin, clusterName, namespace, baseDomain, platform); err != nil {
 				log.Printf("WARNING: Failed to destroy cluster %s (%s): %v", clusterName, spec.Variant, err)
 				log.Printf("ACTION REQUIRED: cloud resources for cluster %s may be orphaned and need manual cleanup (resource group, DNS records, etc.)", clusterName)
 				mu.Lock()
@@ -85,12 +98,15 @@ func main() {
 	log.Printf("All clusters destroyed successfully")
 }
 
-func destroyCluster(hypershiftBin, name, variant string, platform lifecycle.PlatformConfig) error {
-	log.Printf("Destroying cluster %s (%s)", name, variant)
+func destroyCluster(hypershiftBin, name, namespace, baseDomain string, platform lifecycle.PlatformConfig) error {
+	log.Printf("Destroying cluster %s", name)
 
 	args := []string{
 		"destroy", "cluster", platform.Name(),
 		"--name=" + name,
+		"--infra-id=" + name,
+		"--namespace=" + namespace,
+		"--base-domain=" + baseDomain,
 		"--cluster-grace-period=" + clusterGracePeriod,
 	}
 	args = append(args, platform.DestroyArgs()...)

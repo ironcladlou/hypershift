@@ -51,6 +51,9 @@ tools/bin
 # dev
 /dev/
 
+# Local e2e lifecycle runs
+.e2e/
+
 # Python
 __pycache__/
 *.py[cod]

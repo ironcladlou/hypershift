@@ -1,0 +1,21 @@
+[env]
+KUBECONFIG = "{{"{{"}}config_root{{"}}"}}/kubeconfig"
+E2E_HOSTED_CLUSTER_NAME = "{{.ClusterName}}"
+E2E_HOSTED_CLUSTER_NAMESPACE = "{{.Namespace}}"
+HYPERSHIFT_NAMESPACE = "{{.Namespace}}"
+HYPERSHIFT_BINARY = "{{.BinDir}}/hypershift"
+
+[tasks.console]
+description = "Print the console URL"
+run = "echo https://console-openshift-console.apps.{{.ClusterName}}.{{.BaseDomain}}"
+
+[tasks.login]
+description = "Log in to the cluster with oc"
+run = """
+password=$(cat {{"{{"}}config_root{{"}}"}}/kubeadmin-password 2>/dev/null || kubectl get secret -n {{.Namespace}} {{.ClusterName}}-kubeadmin-password -o jsonpath='{.data.password}' | base64 -d)
+oc login https://api.{{.ClusterName}}.{{.BaseDomain}}:6443 -u kubeadmin -p "${password}"
+"""
+
+[tasks.kubeconfig]
+description = "Re-extract the kubeconfig"
+run = "{{.BinDir}}/hypershift create kubeconfig --namespace={{.Namespace}} --name={{.ClusterName}} > {{"{{"}}config_root{{"}}"}}/kubeconfig"
