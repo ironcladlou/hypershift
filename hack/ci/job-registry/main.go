@@ -22,6 +22,7 @@ const (
 	releaseRepository = "openshift/release"
 	releaseMainURL    = "https://github.com/openshift/release/blob/main/"
 	defaultSippyURL   = "https://sippy.dptools.openshift.org"
+	defaultProwURL    = "https://prow.ci.openshift.org"
 	sippyPresubmits   = "Presubmits"
 	jobsRoot          = "ci-operator/jobs"
 	hypershiftJobsDir = "ci-operator/jobs/openshift/hypershift"
@@ -72,6 +73,9 @@ type Job struct {
 	// guarantee that Sippy currently has data for the job. It is nil when no
 	// reliable Sippy route can be constructed.
 	SippyURL *string `yaml:"sippy_url" json:"sippy_url"`
+	// ProwJobHistoryURL links to the job's build history in OpenShift Prow. The
+	// URL does not guarantee that the job has any recorded runs.
+	ProwJobHistoryURL string `yaml:"prow_job_history_url" json:"prow_job_history_url"`
 }
 
 // Presubmit contains properties that do not apply to periodic jobs.
@@ -135,6 +139,7 @@ func main() {
 	}
 	releaseDir := flag.String("release-dir", filepath.Join(home, "Projects", "openshift-release"), "path to an openshift/release checkout")
 	sippyBaseURL := flag.String("sippy-base-url", defaultSippyURL, "base URL for generated Sippy job links")
+	prowBaseURL := flag.String("prow-base-url", defaultProwURL, "base URL for generated Prow job history links")
 	outputFormat := flag.String("format", "yaml", "output format: yaml or json")
 	flag.Parse()
 
@@ -143,6 +148,7 @@ func main() {
 		exitf("discover jobs: %v", err)
 	}
 	populateSippyURLs(&registry, *sippyBaseURL)
+	populateProwJobHistoryURLs(&registry, *prowBaseURL)
 
 	switch *outputFormat {
 	case "yaml":
@@ -160,6 +166,18 @@ func main() {
 		}
 	default:
 		exitf("unsupported output format %q: expected yaml or json", *outputFormat)
+	}
+}
+
+func populateProwJobHistoryURLs(registry *Registry, baseURL string) {
+	baseURL = strings.TrimRight(baseURL, "/") + "/job-history/gs/test-platform-results/"
+	for i := range registry.Jobs {
+		job := &registry.Jobs[i]
+		if job.Type == "presubmit" {
+			job.ProwJobHistoryURL = baseURL + "pr-logs/directory/" + url.PathEscape(job.Name)
+			continue
+		}
+		job.ProwJobHistoryURL = baseURL + "logs/" + url.PathEscape(job.Name)
 	}
 }
 

@@ -49,7 +49,11 @@ Discovery includes:
 The versioned registry schema and field semantics are defined by the documented
 Go types in [main.go](main.go).
 
-## Sippy links
+## External links
+
+Every job includes a deterministic OpenShift Prow job-history URL. Presubmits
+and periodics use their respective Prow storage paths. Use `-prow-base-url` to
+generate links for another Prow deployment.
 
 Sippy URLs are generated deterministically without querying Sippy. Presubmits
 link to the `Presubmits` analysis view, and release periodics link to their
